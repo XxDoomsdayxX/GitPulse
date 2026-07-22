@@ -1,4 +1,4 @@
-﻿name: Release
+name: Release
 
 # Push a version tag to ship:  git tag v1.1.0 && git push origin v1.1.0
 on:
@@ -44,7 +44,7 @@ jobs:
         shell: pwsh
         run: |
           $version = "${{ github.ref_name }}" -replace '^v',''
-          $url = "https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/GitPulse.Setup.$version.exe"
+          $url = "https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/GitPulse-Setup-$version.exe"
           curl.exe -L -o wingetcreate.exe https://aka.ms/wingetcreate/latest
           .\wingetcreate.exe update XxDoomsdayxX.GitPulse `
             --version $version `
