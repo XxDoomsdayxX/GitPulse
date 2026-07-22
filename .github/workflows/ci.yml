@@ -1,0 +1,25 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - name: Unit tests
+        run: npm test
+      - name: App smoke test
+        run: npm run test:app
+      # Packaging is where a missing file entry or a bad build config shows up,
+      # so build here too — but never publish from a CI run.
+      - name: Build installer (verify packaging)
+        run: npm run build -- -p never

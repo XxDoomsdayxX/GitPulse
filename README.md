@@ -1,6 +1,6 @@
 # GitPulse
 
-> A lightweight, always-on-top desktop widget that keeps you in sync with your GitHub repositories — one glance tells you everything.
+> A 200-pixel desktop widget that tells you when your GitHub repos have moved ahead of your local clone — and pulls them with one click.
 
 ![Platform](https://img.shields.io/badge/platform-Windows-blue?style=flat-square)
 ![Electron](https://img.shields.io/badge/electron-28-47848F?style=flat-square&logo=electron)
@@ -9,22 +9,23 @@
 
 ---
 
-## What It Does
+## What it does
 
-GitPulse sits in the corner of your screen and watches your GitHub repositories. The moment a new commit lands on remote, the status dot turns **red** — so you know to pull before you start working. When you're in sync, it stays **green**. No browser tab, no notifications, no guessing.
+GitPulse sits in a corner of your screen watching a list of GitHub repositories. When new commits land on any of them, its dot turns **red** and tells you how many commits you're behind. Click **Pull** and it fast-forwards your local clone. When everything's in sync it stays **green** and silent.
+
+No browser tab. No polling a terminal. One glance.
 
 ```
-● sales-dashboard          ⠿  ×
-────────────────────────────────
-user123/sales-dashboard  ▾
-
-● Up to date
-Darrell Walker · 3dc539f · 2h ago
-fix(wip): scope pending-invoice logic...   ▼ Show more
-checked just now
-
-[ Up to date ]   ↻  ⚙
+● 2 repos behind                    ⠿  ×
+──────────────────────────────────────────
+● gitpulse                      3 behind
+● byron-dashboard              up to date
+● api-server                     checking…
+──────────────────────────────────────────
+   + Add repository            ↻      ⚙
 ```
+
+Expand any row for the latest commit, its author and age, a branch picker, and per-repo actions.
 
 ---
 
@@ -32,15 +33,18 @@ checked just now
 
 | Feature | Details |
 |---|---|
-| **Live sync status** | Green = up to date, Red = behind remote |
-| **Commit details** | Author, short SHA, relative timestamp, commit message |
-| **Expand commit message** | Click "Show more" to read the full message inline |
-| **One-click pull** | Pulls the latest changes to your local clone directly from the widget |
-| **Multi-repo support** | Switch between all your GitHub repositories from a dropdown |
-| **Auto-refresh** | Configurable polling: every 1, 5, 10, or 30 minutes |
-| **System tray icon** | Git-branch logo color-coded to your repo status |
-| **Secure token storage** | Your PAT is encrypted via the OS keychain (Windows DPAPI) |
-| **Draggable** | Position it anywhere on screen — position is remembered between sessions |
+| **Watch many repos at once** | A stacked list, each with its own status, branch and local clone |
+| **Commits-behind count** | "3 behind", not just "behind" |
+| **One-click pull** | Fast-forward pull into your local clone, straight from the widget |
+| **Folder verification** | GitPulse checks the folder you pick is really a clone of that repo before it ever pulls |
+| **Desktop notifications** | Optional toast when a watched repo moves ahead |
+| **Branch picker** | Watch any branch, not just the default one |
+| **Auto-update** | New versions install themselves in the background |
+| **Start with Windows** | Optional login-item, launched hidden to the tray |
+| **System tray** | Icon colour-coded to the worst status; right-click for a per-repo summary |
+| **Secure token storage** | Your PAT is encrypted with the OS keychain (Windows DPAPI) and never reaches the renderer |
+| **Cheap polling** | ETag-conditional requests, so unchanged repos cost nothing against your rate limit |
+| **Draggable** | Put it anywhere; position survives restarts and unplugged monitors |
 | **No admin required** | Installs entirely in your user profile |
 
 ---
@@ -49,212 +53,147 @@ checked just now
 
 ### Option 1 — winget (recommended)
 
-Install directly from the Windows Package Manager — no browser, no download page:
-
 ```cmd
 winget install gitpulse
 ```
 
-GitPulse will download, install silently, and appear in your Start Menu and system tray. To update later:
+To update later — though GitPulse updates itself:
 
 ```cmd
 winget upgrade gitpulse
 ```
 
-> Requires Windows 10 1709 or later. winget ships by default on Windows 11 and is available via the [App Installer](https://apps.microsoft.com/detail/9nblggh4nns1) on Windows 10.
+> Requires Windows 10 1709 or later. winget ships with Windows 11 and is available for Windows 10 via the [App Installer](https://apps.microsoft.com/detail/9nblggh4nns1).
 
 ### Option 2 — Installer
 
-1. Download **`GitPulse Setup 1.0.1.exe`** from the [Releases](https://github.com/XxDoomsdayxX/GitPulse/releases) page
-2. Double-click the installer — no admin password needed
-3. GitPulse installs silently and launches automatically
-4. A shortcut is added to your Desktop and Start Menu
+Download `GitPulse Setup x.y.z.exe` from [Releases](https://github.com/XxDoomsdayxX/GitPulse/releases) and run it. No admin password needed; installs to `%LOCALAPPDATA%\Programs\gitpulse\`.
 
-> Installs to `%LOCALAPPDATA%\Programs\gitpulse\` — no system-wide changes.
-
-### Option 3 — Run from source
+### Option 3 — From source
 
 ```bash
-# 1. Clone the repo
 git clone https://github.com/XxDoomsdayxX/GitPulse.git
 cd GitPulse
-
-# 2. Install dependencies
 npm install
-
-# 3. Start the widget
 npm start
 ```
 
 ---
 
-## First-Time Setup
+## First-time setup
 
-### 1. Create a GitHub Personal Access Token
+### 1. Create a GitHub token
 
-GitPulse needs read access to your repositories.
+GitPulse only ever reads. A **fine-grained** token is recommended:
 
-1. Go to **[GitHub → Settings → Developer settings → Personal access tokens](https://github.com/settings/tokens/new?scopes=repo&description=GitPulse+Widget)**
-2. Click **Generate new token (classic)**
-3. Give it a name (e.g. `GitPulse Widget`)
-4. Check the **`repo`** scope
-5. Click **Generate token** and copy it
+1. Go to [Settings → Developer settings → Fine-grained tokens](https://github.com/settings/personal-access-tokens/new)
+2. Grant access to the repositories you want to watch
+3. Under **Repository permissions**, set **Contents: Read-only** (and **Metadata: Read-only**, which is implied)
+4. Generate and copy the token
 
-> Your token is encrypted and stored locally on your machine. It is never transmitted anywhere except directly to the GitHub API.
+A classic token with the `repo` scope also works, but it grants read *and write* to everything you can access — more than this widget needs.
 
-### 2. Connect the widget
+> Your token is encrypted at rest via the OS keychain and is only ever sent to `api.github.com`.
 
-1. Click the **⚙ settings icon** in the widget's action bar
-2. Paste your token into the **GitHub Token** field
-3. Click **Connect**
+### 2. Connect and add repositories
 
-The widget will verify your token, load your repositories, and show your GitHub username.
-
-### 3. Select a repository
-
-Click the repository dropdown and pick the repo you want to monitor. GitPulse immediately checks its status and starts the auto-refresh timer.
+Click **⚙**, paste the token, hit **Connect**. The repository picker opens — search, then click any repo to start watching it. Add as many as you like.
 
 ---
 
-## Using the Widget
-
-### Status indicators
-
-| Color | Meaning |
-|---|---|
-| 🟢 Green dot | Your local branch is up to date with remote |
-| 🔴 Red dot | New commits exist on remote — you need to pull |
-| 🟡 Amber dot | An error occurred (check your token or network) |
-| ⬜ Pulsing | Currently checking status |
-
-### Pulling changes
-
-When the dot is red, a **Pull** button appears in the action bar.
-
-1. Click **Pull**
-2. If you haven't used this repo before, a folder picker opens — select your local clone
-3. GitPulse runs `git pull` in that directory and updates the status
-
-Your local path is saved so future pulls happen in one click.
-
-### Expanding the commit message
-
-Long commit messages are truncated by default. Click **▼ Show more** beneath the message to expand it — the widget grows to show the full text. Click **▲ Show less** to collapse.
-
-### Switching repositories
-
-Click the repository name at the top of the expanded panel to open the dropdown and select a different repo.
-
-### Controls
+## Using the widget
 
 | Control | Action |
 |---|---|
-| Click the status dot or repo label | Open or close the detail panel |
-| Grab the `⠿` grip (right side of bar) | Drag the widget anywhere on screen |
-| Hover the bar | Reveals the **×** close button |
-| **×** button | Hides the widget to the system tray |
-| **↻** button | Manually refresh status |
-| **⚙** button | Open / close settings |
-| `Esc` | Close dropdown → close settings → close panel |
+| Click the bar | Expand / collapse the watchlist |
+| Click a repo row | Show commit details, branch picker and actions |
+| **Pull** | Fast-forward your local clone (asks for the folder the first time) |
+| **Seen** | Mark the current remote commit as acknowledged without pulling |
+| **⤢ GitHub icon** | Open the repo in your browser |
+| **🗑** | Stop watching the repo |
+| **+ Add repository** | Search and add another repo |
+| **↻** | Refresh everything now |
+| **⚙** | Settings — account, refresh interval, notifications, start with Windows |
+| Grab the `⠿` grip | Drag the widget anywhere |
+| **×** | Hide to the system tray |
+| `Esc` | Close picker → close settings → collapse |
 
-### System tray
+### Status colours
 
-GitPulse lives in the system tray when hidden. The tray icon mirrors the status:
-
-- **Gray** — idle / no repo selected
-- **Green** — up to date
-- **Red** — behind remote
-
-Right-click the tray icon for **Show** and **Quit**.
-
----
-
-## Settings
-
-Open the settings panel by clicking **⚙** in the action bar.
-
-### GitHub Account
-
-When connected, shows your GitHub username with a green indicator and a **Disconnect** button. Disconnecting removes the stored token from your keychain and resets the widget.
-
-### Auto-refresh
-
-Choose how often GitPulse polls GitHub:
-
-| Interval | Best for |
+| Colour | Meaning |
 |---|---|
-| Every 1 min | Active collaboration / fast-moving repos |
-| Every 5 min | Default — balanced |
-| Every 10 min | Slower-paced projects |
-| Every 30 min | Low-traffic / personal repos |
+| 🟢 Green | Every watched repo is up to date |
+| 🔴 Red | At least one repo has commits you haven't pulled |
+| 🟡 Amber | A check failed — expired token, network, rate limit (the row says which) |
+| ⬜ Pulsing | Checking right now |
 
 ---
 
-## Building the Installer
+## How sync detection works
 
-To produce a fresh `GitPulse Setup x.x.x.exe`:
+GitPulse uses the **GitHub REST API** — it never reads your local `.git` folder except when you pull.
+
+1. When you add a repo, its current remote HEAD becomes the "acknowledged" commit
+2. Each poll compares the remote HEAD to that acknowledged SHA
+3. Different → red, with a commits-behind count from the compare API
+4. After a successful pull, the SHA that **actually landed locally** is acknowledged → green
+
+So the status answers "have I pulled what's on the remote?" — not "is my working tree clean?".
+
+**Pull safety:** before running anything, GitPulse verifies the folder is a git work tree whose `origin` points at that exact repository, then runs `git pull --ff-only` with interactive prompts disabled. A mis-picked folder is rejected rather than silently pulling some other project.
+
+---
+
+## Development
 
 ```bash
-# Install dependencies (first time only)
-npm install
-
-# Generate icon assets + build the Windows installer
-npm run build
-
-# Output: dist/GitPulse Setup 1.0.0.exe
+npm start        # run the widget
+npm test         # unit tests (settings migration, git handling, GitHub client)
+npm run test:app # end-to-end smoke test in a real Electron window
+npm run build    # build dist/GitPulse Setup x.y.z.exe
 ```
 
-The icon generator (`scripts/generate-icon.js`) produces `assets/icon.ico` (256 / 48 / 32 / 16 px) using only Node's built-in `zlib` — no external image tools or extra dependencies needed.
+### Project structure
+
+```
+main.js              # Main process — window, tray, polling, IPC, notifications
+preload.js           # contextBridge — the window.widget API
+lib/
+  settings.js        # Schema + migration + atomic, debounced persistence
+  github.js          # GitHub client — ETags, rate-limit backoff, error mapping
+  git.js             # Safe git execution (argv, no shell) and clone verification
+  icon.js            # Dependency-free PNG/tray icon generation
+renderer/
+  index.html         # Markup + CSP
+  style.css          # OKLCH design system
+  app.js             # Watchlist UI, driven by state pushed from main
+test/                # Unit tests + Electron smoke test
+scripts/             # Icon generation
+.github/workflows/   # CI on every push; release + winget submission on a tag
+```
+
+### Releasing
+
+Bump `version` in `package.json`, then:
+
+```bash
+git tag v1.2.0 && git push origin v1.2.0
+```
+
+CI runs the tests, builds the installer, publishes the GitHub release, and — when a `WINGET_TOKEN` secret is configured — opens the winget-pkgs PR.
 
 ---
 
-## Project Structure
+## Roadmap
 
-```
-Github Desktop Widget/
-├── main.js              # Electron main process — GitHub API, IPC, tray, window
-├── preload.js           # contextBridge — exposes window.widget API to renderer
-├── renderer/
-│   ├── index.html       # Widget markup
-│   ├── style.css        # OKLCH design system, all UI styles
-│   └── app.js           # Renderer logic — state, DOM, events
-├── scripts/
-│   └── generate-icon.js # Generates assets/icon.ico from pixel art (no deps)
-├── assets/
-│   ├── icon.ico         # Multi-size Windows icon (generated)
-│   └── icon.png         # 256×256 PNG (generated)
-└── package.json         # electron-builder config
-```
-
----
-
-## How Sync Detection Works
-
-GitPulse uses the **GitHub REST API only** — it never reads your local `.git` folder (except when you click Pull).
-
-1. On first check, the remote HEAD SHA is saved as "acknowledged" for that repo
-2. On every subsequent check, the current remote SHA is compared to the acknowledged one
-3. If they differ → **red** (you're behind remote)
-4. After a successful pull, the new SHA is acknowledged → **green**
-
-This means the status reflects whether you've pulled the latest remote commit — not whether your working tree is clean.
-
----
-
-## Tech Stack
-
-- **[Electron](https://www.electronjs.org/)** v28 — cross-platform desktop shell
-- **Vanilla JS + CSS** — no frontend framework, no bundler
-- **GitHub REST API v3** — repository and commit data
-- **Node `zlib`** — PNG/ICO generation for icons (zero canvas dependency)
-- **`safeStorage`** — OS-level encryption (Windows DPAPI) for PAT storage
-- **`electron-builder`** — NSIS installer packaging for Windows
+- **v1.2** — expanded dashboard window: full repo overview, open PRs and issues, recent activity
+- Pull requests welcome.
 
 ---
 
 ## License
 
-MIT — do whatever you like with it.
+MIT — see [LICENSE](LICENSE).
 
 ---
 

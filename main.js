@@ -1,48 +1,42 @@
+'use strict'
+
 const {
-  app, BrowserWindow, ipcMain, Tray, Menu,
+  app, BrowserWindow, ipcMain, Tray, Menu, Notification,
   nativeImage, safeStorage, screen, shell, dialog
 } = require('electron')
-const path  = require('path')
-const fs    = require('fs')
-const https = require('https')
-const { exec } = require('child_process')
-const { deflateSync } = require('zlib')
+const path = require('path')
+const fs   = require('fs')
 
-const W              = 200
-const H_BAR          = 42
-const H_EXPANDED     = 280
-const H_WITH_SETTINGS = 450
+const { createStore, REFRESH_CHOICES } = require('./lib/settings')
+const { createClient }                 = require('./lib/github')
+const git                              = require('./lib/git')
+const { trayIconBuffer }               = require('./lib/icon')
 
-let win          = null
-let tray         = null
+const W       = 200
+const H_BAR   = 42
+const MARGIN  = 20
+
+let win   = null
+let tray  = null
+let store = null
+let gh    = null
 let refreshTimer = null
 
-// ─── Single instance ───────────────────────────────────────────────────────
-const gotLock = app.requestSingleInstanceLock()
-if (!gotLock) { app.quit() }
-else { app.on('second-instance', () => win?.show()) }
+// Per-repo runtime status, keyed by full name. Settings owns what to watch;
+// this owns what we currently know about it.
+const live = new Map()
 
-// ─── Paths ─────────────────────────────────────────────────────────────────
-const settingsPath = () => path.join(app.getPath('userData'), 'settings.json')
-const tokenPath    = () => path.join(app.getPath('userData'), 'token.enc')
+// ─── Single instance ────────────────────────────────────────────────────────
+if (!app.requestSingleInstanceLock()) app.quit()
+else app.on('second-instance', () => showWindow())
 
-// ─── Settings ──────────────────────────────────────────────────────────────
-function readSettings() {
-  try { return JSON.parse(fs.readFileSync(settingsPath(), 'utf8')) }
-  catch { return { selectedRepo: null, selectedBranch: null, refreshInterval: 5, acknowledgedShas: {}, position: null } }
-}
+// ─── Token ──────────────────────────────────────────────────────────────────
+const tokenPath = () => path.join(app.getPath('userData'), 'token.enc')
 
-function writeSettings(s) {
-  fs.writeFileSync(settingsPath(), JSON.stringify(s, null, 2))
-}
-
-// ─── Token ─────────────────────────────────────────────────────────────────
 function readToken() {
   try {
     const raw = fs.readFileSync(tokenPath())
-    return safeStorage.isEncryptionAvailable()
-      ? safeStorage.decryptString(raw)
-      : raw.toString('utf8')
+    return safeStorage.isEncryptionAvailable() ? safeStorage.decryptString(raw) : raw.toString('utf8')
   } catch { return null }
 }
 
@@ -50,334 +44,452 @@ function writeToken(token) {
   const data = safeStorage.isEncryptionAvailable()
     ? safeStorage.encryptString(token)
     : Buffer.from(token, 'utf8')
-  fs.writeFileSync(tokenPath(), data)
+  fs.writeFileSync(tokenPath(), data, { mode: 0o600 })
 }
 
-function clearToken() {
-  try { fs.unlinkSync(tokenPath()) } catch {}
-}
+function clearToken() { try { fs.unlinkSync(tokenPath()) } catch {} }
 
-// ─── GitHub API ─────────────────────────────────────────────────────────────
-function ghRequest(endpoint, token) {
-  return new Promise((resolve, reject) => {
-    const req = https.request({
-      hostname: 'api.github.com',
-      path: endpoint,
-      headers: {
-        Authorization: `Bearer ${token}`,
-        'User-Agent': 'GitPulse-Widget/1.0',
-        Accept: 'application/vnd.github+json',
-        'X-GitHub-Api-Version': '2022-11-28'
-      }
-    }, res => {
-      let body = ''
-      res.on('data', c => body += c)
-      res.on('end', () => {
-        try {
-          const json = JSON.parse(body)
-          if (res.statusCode >= 400) reject(new Error(json.message || `HTTP ${res.statusCode}`))
-          else resolve(json)
-        } catch { reject(new Error('Invalid response from GitHub')) }
-      })
-    })
-    req.on('error', reject)
-    req.setTimeout(12000, () => req.destroy(new Error('Request timed out')))
-    req.end()
-  })
-}
-
-async function listRepos(token) {
-  const repos = []
-  let page = 1
-  while (true) {
-    const batch = await ghRequest(
-      `/user/repos?sort=pushed&per_page=100&page=${page}&affiliation=owner,collaborator`,
-      token
-    )
-    if (!Array.isArray(batch) || !batch.length) break
-    for (const r of batch) {
-      repos.push({ name: r.name, full_name: r.full_name, default_branch: r.default_branch, private: r.private })
-    }
-    if (batch.length < 100 || ++page > 10) break
+// ─── State ──────────────────────────────────────────────────────────────────
+function entryFor(repo) {
+  if (!live.has(repo.fullName)) {
+    live.set(repo.fullName, { status: 'idle', behindBy: null, commit: null, error: null, checkedAt: null, pulling: false })
   }
-  return repos
+  return live.get(repo.fullName)
 }
 
-async function getLatestCommit(fullName, branch, token) {
-  const data = await ghRequest(`/repos/${fullName}/commits/${branch}`, token)
+function snapshot() {
+  const s = store.get()
   return {
-    sha:      data.sha,
-    shortSha: data.sha.slice(0, 7),
-    message:  data.commit.message.split('\n')[0].slice(0, 80),
-    author:   (data.commit.author?.name || data.commit.committer?.name || 'Unknown').slice(0, 28),
-    date:     data.commit.author?.date || data.commit.committer?.date
+    hasToken:        !!readToken(),
+    username:        s.username,
+    refreshInterval: s.refreshInterval,
+    notifications:   s.notifications,
+    launchAtLogin:   s.launchAtLogin,
+    version:         app.getVersion(),
+    repos: s.repos.map(r => ({ ...r, ...entryFor(r) }))
   }
 }
 
-// ─── PNG icon generator (no external deps) ─────────────────────────────────
-function buildPng(width, height, pixels) {
-  const tbl = new Uint32Array(256)
-  for (let n = 0; n < 256; n++) {
-    let c = n
-    for (let k = 0; k < 8; k++) c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1)
-    tbl[n] = c
-  }
-  const crc = buf => { let c = 0xFFFFFFFF; for (const b of buf) c = tbl[(c ^ b) & 0xFF] ^ (c >>> 8); return (c ^ 0xFFFFFFFF) >>> 0 }
-  const chunk = (type, data) => {
-    const l = Buffer.alloc(4); l.writeUInt32BE(data.length)
-    const t = Buffer.from(type, 'ascii')
-    const cr = Buffer.alloc(4); cr.writeUInt32BE(crc(Buffer.concat([t, data])))
-    return Buffer.concat([l, t, data, cr])
-  }
-  const rows = []
-  for (let y = 0; y < height; y++) {
-    rows.push(0)
-    for (let x = 0; x < width; x++) {
-      const i = (y * width + x) * 4
-      rows.push(pixels[i], pixels[i+1], pixels[i+2], pixels[i+3])
+function broadcast() {
+  win?.webContents.send('widget:state', snapshot())
+  updateTray()
+}
+
+/** Worst status across the watchlist — drives the tray icon and bar summary. */
+function overallStatus() {
+  const all = store.get().repos.map(r => entryFor(r).status)
+  if (all.includes('behind'))  return 'behind'
+  if (all.includes('error'))   return 'error'
+  if (all.some(s => s === 'current')) return 'current'
+  return 'idle'
+}
+
+// ─── Polling ────────────────────────────────────────────────────────────────
+async function refreshRepo(fullName, { notify = true } = {}) {
+  const repo = store.get().repos.find(r => r.fullName === fullName)
+  if (!repo) return
+  const entry = entryFor(repo)
+
+  entry.status = entry.commit ? entry.status : 'loading'
+  if (!entry.commit) broadcast()
+
+  try {
+    const branch = repo.branch || 'HEAD'
+    const commit = await gh.commit(fullName, branch)
+    const wasBehind = entry.status === 'behind'
+
+    if (!repo.ackSha) {
+      // First sighting: treat whatever is on the remote now as the baseline,
+      // otherwise every newly added repo would open in a red "behind" state.
+      store.update(s => {
+        const r = s.repos.find(x => x.fullName === fullName)
+        if (r) r.ackSha = commit.sha
+        return s
+      })
+      Object.assign(entry, { status: 'current', behindBy: 0, commit, error: null, checkedAt: Date.now() })
+    } else if (repo.ackSha === commit.sha) {
+      Object.assign(entry, { status: 'current', behindBy: 0, commit, error: null, checkedAt: Date.now() })
+    } else {
+      const behindBy = await gh.aheadBy(fullName, repo.ackSha, branch)
+      Object.assign(entry, { status: 'behind', behindBy, commit, error: null, checkedAt: Date.now() })
+      if (notify && !wasBehind) notifyBehind(repo, behindBy, commit)
     }
+  } catch (e) {
+    Object.assign(entry, { status: 'error', error: e.message, checkedAt: Date.now() })
   }
-  const hdr = Buffer.alloc(13)
-  hdr.writeUInt32BE(width, 0); hdr.writeUInt32BE(height, 4)
-  hdr[8] = 8; hdr[9] = 6 // 8-bit RGBA
-  return Buffer.concat([
-    Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]),
-    chunk('IHDR', hdr),
-    chunk('IDAT', deflateSync(Buffer.from(rows))),
-    chunk('IEND', Buffer.alloc(0))
-  ])
+  broadcast()
 }
 
-// ─── Tray ──────────────────────────────────────────────────────────────────
-function makeTrayIcon(status) {
-  const [sr, sg, sb] = status === 'current' ? [34, 197, 94]
-                      : status === 'behind'  ? [239, 68, 68]
-                      :                       [148, 163, 184]
-  const S = 32, rad = 6
-  const px = new Uint8Array(S * S * 4)
-
-  const set = (x, y, r, g, b, a = 255) => {
-    if (x < 0 || x >= S || y < 0 || y >= S) return
-    const i = (y * S + x) * 4; px[i] = r; px[i+1] = g; px[i+2] = b; px[i+3] = a
-  }
-
-  // Dark rounded-rect background
-  for (let y = 0; y < S; y++) {
-    for (let x = 0; x < S; x++) {
-      let inside = true
-      if      (x < rad    && y < rad)    inside = (x-rad)**2       + (y-rad)**2       < rad*rad
-      else if (x >= S-rad && y < rad)    inside = (x-(S-rad-1))**2 + (y-rad)**2       < rad*rad
-      else if (x < rad    && y >= S-rad) inside = (x-rad)**2       + (y-(S-rad-1))**2 < rad*rad
-      else if (x >= S-rad && y >= S-rad) inside = (x-(S-rad-1))**2 + (y-(S-rad-1))**2 < rad*rad
-      if (inside) set(x, y, 15, 23, 42)
-      else        set(x, y, 0, 0, 0, 0)
-    }
-  }
-
-  // Git-branch icon — nodes + lines in status color
-  const dot = (cx, cy, r) => {
-    for (let dy = -r; dy <= r; dy++)
-      for (let dx = -r; dx <= r; dx++)
-        if (dx*dx + dy*dy <= r*r) set(cx+dx, cy+dy, sr, sg, sb)
-  }
-  const line = (x1, y1, x2, y2) => {
-    const dx = x2-x1, dy = y2-y1
-    const steps = Math.max(Math.abs(dx), Math.abs(dy))
-    for (let i = 0; i <= steps; i++) {
-      const x = Math.round(x1 + dx*i/steps)
-      const y = Math.round(y1 + dy*i/steps)
-      set(x, y, sr, sg, sb); set(x+1, y, sr, sg, sb)
-    }
-  }
-
-  // Nodes:  A=top-left (10,9)  B=bottom-left (10,23)  C=top-right (22,9)
-  line(10, 13, 10, 20)   // trunk  A→B
-  line(10, 18, 22, 10)   // branch A→C
-  dot(10,  9, 3)         // node A
-  dot(10, 23, 3)         // node B
-  dot(22,  9, 3)         // node C
-
-  return nativeImage.createFromBuffer(buildPng(S, S, px), { scaleFactor: 2.0 })
+async function refreshAll(opts) {
+  const names = store.get().repos.map(r => r.fullName)
+  if (!names.length || !readToken()) { broadcast(); return }
+  // Sequential: a watchlist is a handful of repos, and serialising keeps the
+  // rate-limit footprint predictable.
+  for (const n of names) await refreshRepo(n, opts)
 }
 
-function setTrayStatus(status) {
-  tray?.setImage(makeTrayIcon(status))
+function notifyBehind(repo, behindBy, commit) {
+  if (!store.get().notifications || !Notification.isSupported()) return
+  const count = behindBy ? `${behindBy} new commit${behindBy === 1 ? '' : 's'}` : 'New commits'
+  new Notification({
+    title: `${repo.fullName} · ${count}`,
+    body:  commit ? `${commit.author}: ${commit.message}` : 'Remote has moved ahead',
+    silent: false
+  }).on('click', () => showWindow()).show()
 }
 
-// ─── Window ────────────────────────────────────────────────────────────────
+function startTimer(minutes) {
+  clearInterval(refreshTimer)
+  const mins = REFRESH_CHOICES.includes(Number(minutes)) ? Number(minutes) : 5
+  refreshTimer = setInterval(() => refreshAll(), mins * 60 * 1000)
+}
+
+// ─── Window ─────────────────────────────────────────────────────────────────
+/**
+ * Keeps the widget on a display that actually exists. A saved position from a
+ * monitor that is now unplugged would otherwise put the window off-screen with
+ * no way to drag it back.
+ */
+function clampPosition([x, y], height = H_BAR) {
+  const display = screen.getDisplayNearestPoint({ x, y }) || screen.getPrimaryDisplay()
+  const wa = display.workArea
+  return [
+    Math.round(Math.min(Math.max(x, wa.x), wa.x + wa.width  - W)),
+    Math.round(Math.min(Math.max(y, wa.y), wa.y + wa.height - height))
+  ]
+}
+
+function defaultPosition() {
+  const wa = screen.getPrimaryDisplay().workArea
+  return [wa.x + wa.width - W - MARGIN, wa.y + MARGIN]
+}
+
 function createWindow() {
-  const s = readSettings()
-  const { width: sw, height: sh } = screen.getPrimaryDisplay().workAreaSize
-  const [x, y] = s.position || [sw - W - 20, 20]
+  const s = store.get()
+  const [x, y] = clampPosition(s.position || defaultPosition())
 
   win = new BrowserWindow({
     width: W, height: H_BAR, x, y,
     frame: false, alwaysOnTop: true, resizable: false,
     skipTaskbar: true, transparent: true, hasShadow: true,
+    maximizable: false, fullscreenable: false,
     backgroundColor: '#00000000',
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
-      contextIsolation: true, nodeIntegration: false, sandbox: false
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true
     }
   })
 
-  win.setIcon(makeTrayIcon('idle'))
+  win.setIcon(nativeImage.createFromBuffer(trayIconBuffer('idle')))
   win.loadFile(path.join(__dirname, 'renderer', 'index.html'))
 
   win.on('moved', () => {
+    if (!win) return
     const [wx, wy] = win.getPosition()
-    const cfg = readSettings(); cfg.position = [wx, wy]; writeSettings(cfg)
+    store.update(s => { s.position = [wx, wy]; return s })
   })
   win.on('closed', () => { win = null })
+
+  // Renderer is a local file with a strict CSP; nothing should ever navigate
+  // or spawn a window, so refuse both outright.
+  win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
+  win.webContents.on('will-navigate', e => e.preventDefault())
+
+  screen.on('display-metrics-changed', repositionInsideWorkArea)
+  screen.on('display-removed',         repositionInsideWorkArea)
+}
+
+function repositionInsideWorkArea() {
+  if (!win) return
+  const [x, y] = win.getPosition()
+  const [, h]  = win.getSize()
+  const [cx, cy] = clampPosition([x, y], h)
+  if (cx !== x || cy !== y) win.setPosition(cx, cy)
+}
+
+function showWindow() {
+  if (!win) createWindow()
+  repositionInsideWorkArea()
+  win.show()
+  win.focus()
+}
+
+// ─── Tray ───────────────────────────────────────────────────────────────────
+function trayImage(status) {
+  return nativeImage.createFromBuffer(trayIconBuffer(status), { scaleFactor: 2.0 })
+}
+
+const STATUS_TEXT = {
+  behind:  e => e.behindBy ? `${e.behindBy} behind` : 'behind',
+  current: () => 'up to date',
+  loading: () => 'checking…',
+  error:   e => e.error || 'error',
+  idle:    () => 'not checked'
+}
+
+function updateTray() {
+  if (!tray) return
+  const repos  = store.get().repos
+  const status = overallStatus()
+  tray.setImage(trayImage(status))
+
+  const behind = repos.filter(r => entryFor(r).status === 'behind').length
+  tray.setToolTip(behind ? `GitPulse — ${behind} repo${behind === 1 ? '' : 's'} behind` : 'GitPulse — all up to date')
+
+  const repoItems = repos.length
+    ? repos.map(r => {
+        const e = entryFor(r)
+        return { label: `${r.fullName} — ${STATUS_TEXT[e.status](e)}`, click: () => showWindow() }
+      })
+    : [{ label: 'No repositories watched', enabled: false }]
+
+  tray.setContextMenu(Menu.buildFromTemplate([
+    ...repoItems,
+    { type: 'separator' },
+    { label: 'Refresh now', click: () => refreshAll() },
+    { label: 'Show widget', click: () => showWindow() },
+    { type: 'separator' },
+    { label: 'Quit GitPulse', click: () => app.quit() }
+  ]))
 }
 
 function createTray() {
-  tray = new Tray(makeTrayIcon('idle'))
-  tray.setToolTip('GitPulse')
-  tray.setContextMenu(Menu.buildFromTemplate([
-    { label: 'Show',            click: () => win?.show() },
-    { type: 'separator' },
-    { label: 'Quit GitPulse',   click: () => app.quit() }
-  ]))
-  tray.on('click', () => win?.show())
+  tray = new Tray(trayImage('idle'))
+  tray.on('click', () => showWindow())
+  updateTray()
 }
 
-function startTimer(minutes = 5) {
-  clearInterval(refreshTimer)
-  refreshTimer = setInterval(() => win?.webContents.send('widget:tick'), minutes * 60 * 1000)
+// ─── Auto-update ────────────────────────────────────────────────────────────
+function initAutoUpdate() {
+  if (!app.isPackaged) return
+  try {
+    const { autoUpdater } = require('electron-updater')
+    autoUpdater.autoDownload = true
+    autoUpdater.on('update-downloaded', () => win?.webContents.send('widget:update-ready'))
+    autoUpdater.checkForUpdatesAndNotify().catch(() => {})
+    // A widget can run for weeks; check daily rather than only at launch.
+    setInterval(() => autoUpdater.checkForUpdates().catch(() => {}), 24 * 60 * 60 * 1000)
+  } catch {}
 }
 
-// ─── IPC ───────────────────────────────────────────────────────────────────
-ipcMain.handle('widget:get-settings', () => {
-  const s = readSettings()
-  return { ...s, hasToken: !!readToken() }
-})
+// ─── IPC ────────────────────────────────────────────────────────────────────
+const ok = (extra = {}) => ({ ok: true, ...extra })
 
-ipcMain.handle('widget:save-token', (_, token) => { writeToken(token.trim()); return { ok: true } })
-ipcMain.handle('widget:clear-token', () => { clearToken(); return { ok: true } })
+ipcMain.handle('widget:get-state', () => snapshot())
 
-ipcMain.handle('widget:get-user', async () => {
-  const token = readToken()
-  if (!token) return { error: 'No token' }
+ipcMain.handle('widget:save-token', async (_, token) => {
+  const trimmed = String(token || '').trim()
+  if (!trimmed) return { error: 'Token is empty' }
+  writeToken(trimmed)
   try {
-    const data = await ghRequest('/user', token)
-    const s = readSettings()
-    s.username = data.login
-    writeSettings(s)
-    return { login: data.login, name: data.name || data.login }
-  } catch (e) { return { error: e.message } }
-})
-
-ipcMain.handle('widget:fetch-repos', async () => {
-  const token = readToken()
-  if (!token) return { error: 'No token configured' }
-  try { return { repos: await listRepos(token) } }
-  catch (e) { return { error: e.message } }
-})
-
-ipcMain.handle('widget:fetch-status', async (_, { fullName, branch }) => {
-  const token = readToken()
-  if (!token) return { error: 'No token configured' }
-  try {
-    const commit = await getLatestCommit(fullName, branch, token)
-    const s      = readSettings()
-    const acked  = s.acknowledgedShas?.[fullName]
-    if (!acked) {
-      if (!s.acknowledgedShas) s.acknowledgedShas = {}
-      s.acknowledgedShas[fullName] = commit.sha
-      writeSettings(s)
-      setTrayStatus('current')
-      return { commit, behind: false }
-    }
-    const behind = acked !== commit.sha
-    setTrayStatus(behind ? 'behind' : 'current')
-    return { commit, behind }
+    const user = await gh.user()
+    store.update(s => { s.username = user.login; return s }, { immediate: true })
+    refreshAll()
+    return ok({ username: user.login })
   } catch (e) {
-    setTrayStatus('idle')
+    clearToken()
     return { error: e.message }
   }
 })
 
-ipcMain.handle('widget:acknowledge', (_, { fullName, sha }) => {
-  const s = readSettings()
-  if (!s.acknowledgedShas) s.acknowledgedShas = {}
-  s.acknowledgedShas[fullName] = sha
-  writeSettings(s)
-  setTrayStatus('current')
-  return { ok: true }
+ipcMain.handle('widget:clear-token', () => {
+  clearToken()
+  live.clear()
+  store.update(s => { s.username = null; return s }, { immediate: true })
+  broadcast()
+  return ok()
 })
 
-ipcMain.handle('widget:select-repo', (_, repo) => {
-  const s = readSettings()
-  s.selectedRepo   = repo.full_name
-  s.selectedBranch = repo.default_branch
-  writeSettings(s)
-  return { ok: true }
+ipcMain.handle('widget:list-repos', async () => {
+  try { return { repos: await gh.repos() } }
+  catch (e) { return { error: e.message } }
+})
+
+ipcMain.handle('widget:list-branches', async (_, fullName) => {
+  try { return { branches: await gh.branches(fullName) } }
+  catch (e) { return { error: e.message } }
+})
+
+ipcMain.handle('widget:add-repo', async (_, { fullName, branch }) => {
+  const existing = store.get().repos.find(r => r.fullName === fullName)
+  if (existing) return { error: 'Already watching that repository' }
+  store.update(s => {
+    s.repos.push({ fullName, branch: branch || null, localPath: null, ackSha: null })
+    return s
+  }, { immediate: true })
+  broadcast()
+  await refreshRepo(fullName, { notify: false })
+  return ok()
+})
+
+ipcMain.handle('widget:remove-repo', (_, fullName) => {
+  store.update(s => { s.repos = s.repos.filter(r => r.fullName !== fullName); return s }, { immediate: true })
+  live.delete(fullName)
+  broadcast()
+  return ok()
+})
+
+ipcMain.handle('widget:set-branch', async (_, { fullName, branch }) => {
+  store.update(s => {
+    const r = s.repos.find(x => x.fullName === fullName)
+    // The acknowledged SHA belongs to the old branch; keeping it would report a
+    // nonsense "behind" count against the new one.
+    if (r) { r.branch = branch; r.ackSha = null }
+    return s
+  }, { immediate: true })
+  await refreshRepo(fullName, { notify: false })
+  return ok()
+})
+
+ipcMain.handle('widget:refresh', async (_, fullName) => {
+  if (fullName) await refreshRepo(fullName)
+  else await refreshAll()
+  return ok()
+})
+
+ipcMain.handle('widget:acknowledge', (_, fullName) => {
+  const entry = live.get(fullName)
+  if (!entry?.commit) return { error: 'Nothing to acknowledge' }
+  store.update(s => {
+    const r = s.repos.find(x => x.fullName === fullName)
+    if (r) r.ackSha = entry.commit.sha
+    return s
+  }, { immediate: true })
+  Object.assign(entry, { status: 'current', behindBy: 0 })
+  broadcast()
+  return ok()
+})
+
+ipcMain.handle('widget:pick-folder', async (_, fullName) => {
+  const result = await dialog.showOpenDialog(win, {
+    properties: ['openDirectory'],
+    title: `Select your local clone of ${fullName}`,
+    buttonLabel: 'Use this folder'
+  })
+  if (result.canceled) return { canceled: true }
+
+  const dir = result.filePaths[0]
+  const verified = await git.verifyClone(dir, fullName)
+  if (!verified.ok) return { error: verified.error }
+
+  store.update(s => {
+    const r = s.repos.find(x => x.fullName === fullName)
+    if (r) r.localPath = dir
+    return s
+  }, { immediate: true })
+  broadcast()
+  return ok({ localPath: dir })
+})
+
+ipcMain.handle('widget:pull', async (_, fullName) => {
+  const repo = store.get().repos.find(r => r.fullName === fullName)
+  if (!repo) return { error: 'Not watching that repository' }
+  if (!repo.localPath) return { error: 'No local folder set', needsFolder: true }
+
+  const entry = entryFor(repo)
+  entry.pulling = true
+  broadcast()
+
+  const result = await git.pull(repo.localPath, fullName)
+  entry.pulling = false
+
+  if (!result.ok) {
+    entry.error = result.error
+    broadcast()
+    return { error: result.error }
+  }
+
+  // Acknowledge the SHA that actually landed, not the one from the last poll.
+  if (result.sha) {
+    store.update(s => {
+      const r = s.repos.find(x => x.fullName === fullName)
+      if (r) r.ackSha = result.sha
+      return s
+    }, { immediate: true })
+  }
+  entry.error = null
+  await refreshRepo(fullName, { notify: false })
+  return ok({ output: result.output })
 })
 
 ipcMain.handle('widget:set-refresh', (_, minutes) => {
-  const s = readSettings(); s.refreshInterval = minutes; writeSettings(s)
-  startTimer(minutes); return { ok: true }
+  store.update(s => { s.refreshInterval = Number(minutes); return s }, { immediate: true })
+  startTimer(minutes)
+  broadcast()
+  return ok()
+})
+
+ipcMain.handle('widget:set-notifications', (_, enabled) => {
+  store.update(s => { s.notifications = !!enabled; return s }, { immediate: true })
+  broadcast()
+  return ok()
+})
+
+ipcMain.handle('widget:set-launch-at-login', (_, enabled) => {
+  store.update(s => { s.launchAtLogin = !!enabled; return s }, { immediate: true })
+  app.setLoginItemSettings({ openAtLogin: !!enabled, args: ['--hidden'] })
+  broadcast()
+  return ok()
 })
 
 ipcMain.handle('widget:set-height', (_, h) => {
   if (!win) return { ok: false }
+  const wa  = screen.getDisplayNearestPoint({ x: win.getPosition()[0], y: win.getPosition()[1] }).workArea
+  const max = Math.max(H_BAR, wa.height - 2 * MARGIN)
+  const height = Math.max(H_BAR, Math.min(Math.round(h), max))
+
   // Windows pins the min/max size to the current size while `resizable: false`,
   // so setSize() can grow the window but never shrink it back — leaving an
   // invisible, click-blocking region below the collapsed bar. Toggle resizable
-  // around the call so the constraints follow the new height.
+  // around the call so the size constraints follow the new height.
   win.setResizable(true)
-  win.setSize(W, Math.round(h))
+  win.setSize(W, height)
   win.setResizable(false)
-  return { ok: true }
+  repositionInsideWorkArea()
+  return ok({ height })
 })
 
-ipcMain.handle('widget:open-external', (_, url) => shell.openExternal(url))
-
-ipcMain.handle('widget:pick-folder', async () => {
-  const result = await dialog.showOpenDialog(win, {
-    properties: ['openDirectory'],
-    title: 'Select local repository folder',
-    buttonLabel: 'Use this folder'
-  })
-  return result.canceled ? null : result.filePaths[0]
+ipcMain.handle('widget:open-external', (_, url) => {
+  // Only ever hand GitHub URLs to the OS browser.
+  if (!/^https:\/\/([a-z0-9-]+\.)?github\.com\//i.test(String(url))) return { error: 'Blocked' }
+  shell.openExternal(url)
+  return ok()
 })
 
-ipcMain.handle('widget:get-local-path', (_, fullName) => {
-  const s = readSettings()
-  return s.localPaths?.[fullName] ?? null
-})
+ipcMain.handle('widget:hide', () => { win?.hide(); return ok() })
+ipcMain.handle('widget:quit', () => { app.quit(); return ok() })
 
-ipcMain.handle('widget:set-local-path', (_, { fullName, localPath }) => {
-  const s = readSettings()
-  if (!s.localPaths) s.localPaths = {}
-  s.localPaths[fullName] = localPath
-  writeSettings(s)
-  return { ok: true }
-})
-
-ipcMain.handle('widget:run-pull', (_, { localPath }) => {
-  return new Promise(resolve => {
-    const safePath = localPath.replace(/\\/g, '/')
-    exec(`git -c safe.directory="${safePath}" pull`, { cwd: localPath, timeout: 30000 }, (err, stdout, stderr) => {
-      if (err) resolve({ error: (stderr || err.message).trim().slice(0, 120) })
-      else     resolve({ ok: true, output: stdout.trim().slice(0, 120) })
-    })
-  })
-})
-
-ipcMain.handle('widget:hide', () => win?.hide())
-ipcMain.handle('widget:quit', () => app.quit())
-
-// ─── Lifecycle ─────────────────────────────────────────────────────────────
-app.whenReady().then(() => {
+// ─── Lifecycle ──────────────────────────────────────────────────────────────
+app.whenReady().then(async () => {
   if (process.platform === 'darwin') app.dock.hide()
-  if (process.platform === 'win32') app.setAppUserModelId('com.gitpulse.widget')
+  if (process.platform === 'win32')  app.setAppUserModelId('com.gitpulse.widget')
+
+  store = createStore(path.join(app.getPath('userData'), 'settings.json'))
+  gh    = createClient({ getToken: readToken })
+
+  // Keep the OS login-item in sync with the stored preference in case it was
+  // changed outside the app (or the app was reinstalled).
+  app.setLoginItemSettings({ openAtLogin: store.get().launchAtLogin, args: ['--hidden'] })
 
   createWindow()
   createTray()
-  startTimer(readSettings().refreshInterval || 5)
+  startTimer(store.get().refreshInterval)
+  initAutoUpdate()
+
+  win.webContents.once('did-finish-load', () => {
+    broadcast()
+    if (process.argv.includes('--hidden')) win.hide()
+    refreshAll({ notify: false })
+  })
+
+  // Coming back from sleep, the poll timer may have missed hours of commits.
+  require('electron').powerMonitor.on('resume', () => refreshAll())
 })
 
-app.on('window-all-closed', e => e.preventDefault())
-app.on('before-quit', () => clearInterval(refreshTimer))
+app.on('window-all-closed', e => e.preventDefault?.())
+app.on('before-quit', () => {
+  clearInterval(refreshTimer)
+  store?.flush()
+})

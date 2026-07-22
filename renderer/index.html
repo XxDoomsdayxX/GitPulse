@@ -2,25 +2,21 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; form-action 'none'; base-uri 'none'">
   <title>GitPulse</title>
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
-<div class="widget">
+<div class="widget" id="widget">
 
   <!-- Always-visible compact bar -->
   <div class="bar" id="bar">
-    <div class="bar-left" id="barLeft">
+    <div class="bar-left" id="barLeft" role="button" tabindex="0" aria-expanded="false" aria-controls="panel">
       <div class="status-dot idle" id="barDot" role="img" aria-label="Idle"></div>
       <span class="bar-label" id="barLabel">GitPulse</span>
     </div>
     <div class="bar-right">
-      <button class="icon-btn chevron-btn" id="chevronBtn" aria-label="Toggle details" aria-hidden="true">
-        <svg width="10" height="6" viewBox="0 0 10 6" fill="none" aria-hidden="true">
-          <path d="M1 1L5 5L9 1" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
-        </svg>
-      </button>
       <span class="drag-grip" aria-hidden="true">
         <svg width="6" height="10" viewBox="0 0 6 10" fill="currentColor" aria-hidden="true">
           <circle cx="1.5" cy="1.5" r="1"/><circle cx="4.5" cy="1.5" r="1"/>
@@ -39,33 +35,18 @@
   <!-- Expandable detail panel -->
   <div class="panel" id="panel" hidden>
 
-    <!-- Repo selector -->
-    <div class="panel-section">
-      <div class="dropdown" id="dropdown">
-        <button class="dropdown-trigger" id="dropdownTrigger"
-          aria-haspopup="listbox" aria-expanded="false" aria-label="Select repository">
-          <span class="dropdown-label" id="dropdownLabel">Select a repository</span>
-          <svg class="chevron" width="9" height="6" viewBox="0 0 9 6" fill="none" aria-hidden="true">
-            <path d="M1 1L4.5 5L8 1" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>
-          </svg>
-        </button>
-        <div class="dropdown-menu" id="dropdownMenu" role="listbox" aria-label="Repositories" hidden></div>
-      </div>
-    </div>
+    <div class="repo-list" id="repoList" role="list"></div>
 
     <div class="panel-divider"></div>
 
-    <!-- Commit detail -->
-    <div class="panel-commit" id="panelCommit" role="status" aria-live="polite">
-      <span class="commit-prompt">Select a repository above</span>
-    </div>
-
-    <div class="panel-divider"></div>
-
-    <!-- Actions -->
     <div class="panel-actions">
-      <button class="btn-pull" id="pullBtn" disabled>Pull</button>
-      <button class="icon-btn action-icon" id="refreshBtn" aria-label="Refresh" title="Refresh">
+      <button class="btn-add" id="addBtn">
+        <svg width="9" height="9" viewBox="0 0 9 9" fill="none" aria-hidden="true">
+          <path d="M4.5 1v7M1 4.5h7" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/>
+        </svg>
+        Add repository
+      </button>
+      <button class="icon-btn action-icon" id="refreshBtn" aria-label="Refresh all" title="Refresh all">
         <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
           <path fill-rule="evenodd" d="M8 3a5 5 0 1 0 4.546 2.914.5.5 0 0 1 .908-.417A6 6 0 1 1 8 2v1z"/>
           <path d="M8 4.466V.534a.25.25 0 0 1 .41-.192l2.36 1.966c.12.1.12.284 0 .384L8.41 4.658A.25.25 0 0 1 8 4.466z"/>
@@ -79,32 +60,35 @@
       </button>
     </div>
 
-    <!-- Settings inline panel -->
-    <div class="settings-panel" id="settingsPanel" hidden aria-hidden="true">
+    <!-- Add-repository picker -->
+    <div class="sub-panel" id="addPanel" hidden>
       <div class="panel-divider"></div>
-      <div class="settings-inner">
+      <div class="sub-inner">
+        <input type="text" id="repoSearch" class="text-input search-input"
+               placeholder="Search repositories…" autocomplete="off" spellcheck="false"
+               aria-label="Search repositories">
+        <div class="option-list" id="repoOptions" role="listbox" aria-label="Repositories"></div>
+      </div>
+    </div>
+
+    <!-- Settings -->
+    <div class="sub-panel" id="settingsPanel" hidden>
+      <div class="panel-divider"></div>
+      <div class="sub-inner">
 
         <div class="settings-group">
-          <!-- Not connected -->
           <div id="tokenForm">
             <label class="settings-label" for="tokenInput">GitHub Token</label>
-            <input
-              type="password"
-              id="tokenInput"
-              class="text-input"
-              placeholder="ghp_xxxxxxxxxxxx"
-              autocomplete="off"
-              spellcheck="false"
-            >
+            <input type="password" id="tokenInput" class="text-input"
+                   placeholder="github_pat_… or ghp_…" autocomplete="off" spellcheck="false">
             <div class="settings-row-actions">
               <button class="btn-connect" id="connectBtn">Connect</button>
             </div>
-            <p class="settings-hint">
+            <p class="settings-hint" id="tokenHint">
               <button class="hint-link" id="tokenDocsBtn">Create token</button>
-              &nbsp;&middot;&nbsp;<code>repo</code> scope
+              &nbsp;&middot;&nbsp;read-only <code>contents</code> access
             </p>
           </div>
-          <!-- Connected -->
           <div id="tokenConnected" hidden>
             <label class="settings-label">GitHub Account</label>
             <div class="connected-row">
@@ -119,19 +103,37 @@
           <label class="settings-label" for="refreshSelect">Auto-refresh</label>
           <select id="refreshSelect" class="select-input">
             <option value="1">Every minute</option>
-            <option value="5" selected>Every 5 min</option>
+            <option value="5">Every 5 min</option>
             <option value="10">Every 10 min</option>
             <option value="30">Every 30 min</option>
           </select>
+        </div>
+
+        <div class="settings-group">
+          <label class="toggle-row">
+            <input type="checkbox" id="notifyToggle">
+            <span>Notify on new commits</span>
+          </label>
+          <label class="toggle-row">
+            <input type="checkbox" id="loginToggle">
+            <span>Start with Windows</span>
+          </label>
+        </div>
+
+        <div class="settings-footer">
+          <span id="versionLabel">GitPulse</span>
+          <button class="hint-link" id="quitBtn">Quit</button>
         </div>
 
       </div>
     </div>
 
     <div class="panel-end"></div>
-
   </div>
+
+  <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
 </div>
+
 <script src="app.js"></script>
 </body>
 </html>

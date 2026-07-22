@@ -1,0 +1,53 @@
+name: Release
+
+# Push a version tag to ship:  git tag v1.1.0 && git push origin v1.1.0
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - run: npm ci
+      - run: npm test
+      - run: npm run test:app
+
+      - name: Verify tag matches package.json version
+        shell: pwsh
+        run: |
+          $pkg = (Get-Content package.json | ConvertFrom-Json).version
+          $tag = "${{ github.ref_name }}" -replace '^v',''
+          if ($pkg -ne $tag) { throw "package.json is $pkg but the tag is $tag" }
+
+      - name: Build and publish the GitHub release
+        run: npm run build -- -p always
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Submit to winget
+        # Optional: needs a PAT (public_repo scope) that can fork microsoft/winget-pkgs.
+        # Skipped automatically when the secret isn't configured.
+        env:
+          WINGET_TOKEN: ${{ secrets.WINGET_TOKEN }}
+        if: env.WINGET_TOKEN != ''
+        shell: pwsh
+        run: |
+          $version = "${{ github.ref_name }}" -replace '^v',''
+          $url = "https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/GitPulse.Setup.$version.exe"
+          curl.exe -L -o wingetcreate.exe https://aka.ms/wingetcreate/latest
+          .\wingetcreate.exe update XxDoomsdayxX.GitPulse `
+            --version $version `
+            --urls "$url|x64" `
+            --submit `
+            --token "$env:WINGET_TOKEN"

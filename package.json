@@ -1,14 +1,25 @@
 {
   "name": "gitpulse",
   "productName": "GitPulse",
-  "version": "1.0.1",
+  "version": "1.1.0",
   "description": "Floating desktop widget for monitoring GitHub repository sync status.",
   "main": "main.js",
+  "author": "XxDoomsdayxX",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/XxDoomsdayxX/GitPulse.git"
+  },
   "scripts": {
     "start": "electron .",
+    "test": "node --test test/*.test.js",
+    "test:app": "electron test/smoke.electron.js",
     "generate-icon": "node scripts/generate-icon.js",
     "build": "npm run generate-icon && electron-builder --win",
     "dist": "npm run build"
+  },
+  "dependencies": {
+    "electron-updater": "^6.3.9"
   },
   "devDependencies": {
     "electron": "^28.3.3",
@@ -17,7 +28,7 @@
   "build": {
     "appId": "com.gitpulse.widget",
     "productName": "GitPulse",
-    "copyright": "Copyright © 2024 GitPulse",
+    "copyright": "Copyright © 2026 GitPulse",
     "directories": {
       "output": "dist",
       "buildResources": "assets"
@@ -25,8 +36,16 @@
     "files": [
       "main.js",
       "preload.js",
+      "lib/**/*",
       "renderer/**/*",
       "package.json"
+    ],
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "XxDoomsdayxX",
+        "repo": "GitPulse"
+      }
     ],
     "win": {
       "icon": "assets/icon.ico",
