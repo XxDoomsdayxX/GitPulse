@@ -322,8 +322,13 @@ ipcMain.handle('widget:set-refresh', (_, minutes) => {
 
 ipcMain.handle('widget:set-height', (_, h) => {
   if (!win) return { ok: false }
-  const [currentW] = win.getSize()
-  win.setSize(currentW, h, true)
+  // Windows pins the min/max size to the current size while `resizable: false`,
+  // so setSize() can grow the window but never shrink it back — leaving an
+  // invisible, click-blocking region below the collapsed bar. Toggle resizable
+  // around the call so the constraints follow the new height.
+  win.setResizable(true)
+  win.setSize(W, Math.round(h))
+  win.setResizable(false)
   return { ok: true }
 })
 
