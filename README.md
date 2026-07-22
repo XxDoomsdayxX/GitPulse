@@ -167,8 +167,8 @@ renderer/
   index.html         # Markup + CSP
   style.css          # OKLCH design system
   app.js             # Watchlist UI, driven by state pushed from main
-test/                # Unit tests + Electron smoke test
-scripts/             # Icon generation
+test/                # Unit tests (node --test)
+scripts/             # Icon generation + Electron smoke test
 .github/workflows/   # CI on every push; release + winget submission on a tag
 ```
 

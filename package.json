@@ -12,8 +12,8 @@
   },
   "scripts": {
     "start": "electron .",
-    "test": "node --test test/*.test.js",
-    "test:app": "electron test/smoke.electron.js",
+    "test": "node --test",
+    "test:app": "electron scripts/smoke.electron.js",
     "generate-icon": "node scripts/generate-icon.js",
     "build": "npm run generate-icon && electron-builder --win",
     "dist": "npm run build"

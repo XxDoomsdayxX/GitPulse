@@ -1,4 +1,4 @@
-name: CI
+﻿name: CI
 
 on:
   push:
@@ -12,7 +12,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
           cache: npm
       - run: npm ci
       - name: Unit tests
@@ -20,6 +20,6 @@ jobs:
       - name: App smoke test
         run: npm run test:app
       # Packaging is where a missing file entry or a bad build config shows up,
-      # so build here too — but never publish from a CI run.
+      # so build here too - but never publish from a CI run.
       - name: Build installer (verify packaging)
         run: npm run build -- -p never
