@@ -44,7 +44,8 @@
       {
         "provider": "github",
         "owner": "XxDoomsdayxX",
-        "repo": "GitPulse"
+        "repo": "GitPulse",
+        "releaseType": "release"
       }
     ],
     "win": {
